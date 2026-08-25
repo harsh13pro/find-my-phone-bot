@@ -1,13 +1,16 @@
 services:
-  - type: worker
+  - type: web
     name: find-my-phone-bot
     runtime: python
+    plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: python bot.py
+    startCommand: gunicorn --bind 0.0.0.0:$PORT bot:app
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: MASTER_PASSWORD
         sync: false
       - key: MACRODROID_WEBHOOK_URL
+        sync: false
+      - key: TELEGRAM_WEBHOOK_SECRET
         sync: false
