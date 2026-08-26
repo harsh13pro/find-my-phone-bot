@@ -112,11 +112,20 @@ def verify_password(entered, actual):
 def trigger_macrodroid():
     response = requests.get(
         MACRODROID_WEBHOOK_URL,
-        timeout=15
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "*/*"
+        },
+        timeout=30,
+        allow_redirects=True
     )
+
+    print("MacroDroid HTTP status:", response.status_code)
+    print("MacroDroid response:", response.text[:500])
 
     response.raise_for_status()
 
+    return response
 
 # ============================================================
 # Authentication Page
