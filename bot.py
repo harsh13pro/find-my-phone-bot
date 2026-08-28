@@ -14,14 +14,38 @@ app = Flask(__name__)
 # ============================================================
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-MACRODROID_WEBHOOK_URL = os.environ["MACRODROID_WEBHOOK_URL"]
-STOP_MACRODROID_WEBHOOK_URL = os.environ["STOP_MACRODROID_WEBHOOK_URL"]
-MASTER_PASSWORD = os.environ["MASTER_PASSWORD"]
-PUBLIC_BASE_URL = os.environ["PUBLIC_BASE_URL"].rstrip("/")
 
-SESSION_TTL = int(os.getenv("SESSION_TTL", "300"))
-MAX_ATTEMPTS = int(os.getenv("MAX_ATTEMPTS", "3"))
-LOCK_TIME = int(os.getenv("LOCK_TIME", "600"))
+MACRODROID_WEBHOOK_URL = os.environ[
+    "MACRODROID_WEBHOOK_URL"
+]
+
+STOP_MACRODROID_WEBHOOK_URL = os.environ[
+    "STOP_MACRODROID_WEBHOOK_URL"
+]
+
+UNMUTE_MACRODROID_WEBHOOK_URL = os.environ[
+    "UNMUTE_MACRODROID_WEBHOOK_URL"
+]
+
+MASTER_PASSWORD = os.environ["MASTER_PASSWORD"]
+
+PUBLIC_BASE_URL = os.environ[
+    "PUBLIC_BASE_URL"
+].rstrip("/")
+
+
+SESSION_TTL = int(
+    os.getenv("SESSION_TTL", "300")
+)
+
+MAX_ATTEMPTS = int(
+    os.getenv("MAX_ATTEMPTS", "3")
+)
+
+LOCK_TIME = int(
+    os.getenv("LOCK_TIME", "600")
+)
+
 
 sessions = {}
 sessions_lock = Lock()
@@ -31,10 +55,13 @@ sessions_lock = Lock()
 # Telegram API
 # ============================================================
 
-TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+TELEGRAM_API = (
+    f"https://api.telegram.org/bot{BOT_TOKEN}"
+)
 
 
 def telegram_send_message(chat_id, text):
+
     response = requests.post(
         f"{TELEGRAM_API}/sendMessage",
         json={
@@ -48,7 +75,10 @@ def telegram_send_message(chat_id, text):
 
 
 def set_telegram_webhook():
-    webhook_url = f"{PUBLIC_BASE_URL}/telegram/webhook"
+
+    webhook_url = (
+        f"{PUBLIC_BASE_URL}/telegram/webhook"
+    )
 
     response = requests.post(
         f"{TELEGRAM_API}/setWebhook",
@@ -58,7 +88,10 @@ def set_telegram_webhook():
         timeout=15
     )
 
-    print("Telegram webhook setup:", response.text)
+    print(
+        "Telegram webhook setup:",
+        response.text
+    )
 
 
 # ============================================================
@@ -66,9 +99,11 @@ def set_telegram_webhook():
 # ============================================================
 
 def cleanup_sessions():
+
     now = time.time()
 
     with sessions_lock:
+
         expired = [
             token
             for token, data in sessions.items()
@@ -76,34 +111,57 @@ def cleanup_sessions():
         ]
 
         for token in expired:
-            sessions.pop(token, None)
+
+            sessions.pop(
+                token,
+                None
+            )
 
 
 def create_session():
+
     cleanup_sessions()
 
     token = secrets.token_urlsafe(32)
 
     with sessions_lock:
+
         sessions[token] = {
-            "expires": time.time() + SESSION_TTL,
-            "attempts": 0,
-            "used": False,
-            "locked_until": 0
+
+            "expires":
+                time.time() + SESSION_TTL,
+
+            "attempts":
+                0,
+
+            "used":
+                False,
+
+            "locked_until":
+                0
         }
 
     return token
 
 
 def get_session(token):
+
     cleanup_sessions()
 
     with sessions_lock:
+
         return sessions.get(token)
 
 
-def verify_password(entered, actual):
-    return hmac.compare_digest(entered, actual)
+def verify_password(
+    entered,
+    actual
+):
+
+    return hmac.compare_digest(
+        entered,
+        actual
+    )
 
 
 # ============================================================
@@ -111,13 +169,21 @@ def verify_password(entered, actual):
 # ============================================================
 
 def trigger_macrodroid():
+
     response = requests.get(
+
         MACRODROID_WEBHOOK_URL,
+
         headers={
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "*/*"
+            "User-Agent":
+                "Mozilla/5.0",
+
+            "Accept":
+                "*/*"
         },
+
         timeout=30,
+
         allow_redirects=True
     )
 
@@ -141,13 +207,21 @@ def trigger_macrodroid():
 # ============================================================
 
 def trigger_stop_macrodroid():
+
     response = requests.get(
+
         STOP_MACRODROID_WEBHOOK_URL,
+
         headers={
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "*/*"
+            "User-Agent":
+                "Mozilla/5.0",
+
+            "Accept":
+                "*/*"
         },
+
         timeout=30,
+
         allow_redirects=True
     )
 
@@ -158,6 +232,44 @@ def trigger_stop_macrodroid():
 
     print(
         "STOP MacroDroid response:",
+        response.text[:500]
+    )
+
+    response.raise_for_status()
+
+    return response
+
+
+# ============================================================
+# MacroDroid - UNMUTE
+# ============================================================
+
+def trigger_unmute_macrodroid():
+
+    response = requests.get(
+
+        UNMUTE_MACRODROID_WEBHOOK_URL,
+
+        headers={
+            "User-Agent":
+                "Mozilla/5.0",
+
+            "Accept":
+                "*/*"
+        },
+
+        timeout=30,
+
+        allow_redirects=True
+    )
+
+    print(
+        "UNMUTE MacroDroid HTTP status:",
+        response.status_code
+    )
+
+    print(
+        "UNMUTE MacroDroid response:",
         response.text[:500]
     )
 
@@ -287,7 +399,7 @@ This link is temporary and can be used only once.
 
 
 # ============================================================
-# Common Authentication Function
+# Common Authentication
 # ============================================================
 
 def authenticate_command(
@@ -298,8 +410,10 @@ def authenticate_command(
     session = get_session(token)
 
     if not session:
+
         return (
-            "This authentication link is invalid or expired.",
+            "This authentication link "
+            "is invalid or expired.",
             410
         )
 
@@ -308,8 +422,10 @@ def authenticate_command(
     with sessions_lock:
 
         if session["used"]:
+
             return (
-                "This authentication link has already been used.",
+                "This authentication link "
+                "has already been used.",
                 410
             )
 
@@ -320,21 +436,32 @@ def authenticate_command(
             )
 
             return render_template_string(
+
                 HTML,
+
                 title="Secure Access",
-                description="Authentication required.",
+
+                description=
+                    "Authentication required.",
+
                 message=(
                     "Too many incorrect attempts. "
-                    f"Try again in about {remaining} seconds."
+                    f"Try again in about "
+                    f"{remaining} seconds."
                 )
+
             ), 429
 
         if session["expires"] <= now:
 
-            sessions.pop(token, None)
+            sessions.pop(
+                token,
+                None
+            )
 
             return (
-                "This authentication link has expired.",
+                "This authentication link "
+                "has expired.",
                 410
             )
 
@@ -354,6 +481,10 @@ def authenticate_command(
 
                 try:
 
+                    # ----------------------------------------
+                    # FIND PHONE
+                    # ----------------------------------------
+
                     if command_type == "findphone":
 
                         trigger_macrodroid()
@@ -362,6 +493,10 @@ def authenticate_command(
                             "Authentication successful. "
                             "Find Phone command sent."
                         )
+
+                    # ----------------------------------------
+                    # STOP
+                    # ----------------------------------------
 
                     elif command_type == "stop":
 
@@ -372,6 +507,20 @@ def authenticate_command(
                             "Find Phone alert stopped."
                         )
 
+                    # ----------------------------------------
+                    # UNMUTE
+                    # ----------------------------------------
+
+                    elif command_type == "unmute":
+
+                        trigger_unmute_macrodroid()
+
+                        success_message = (
+                            "Authentication successful. "
+                            "Phone unmuted and "
+                            "notification volume set to 100%."
+                        )
+
                     else:
 
                         return (
@@ -379,13 +528,22 @@ def authenticate_command(
                             400
                         )
 
-                    sessions.pop(token, None)
+                    sessions.pop(
+                        token,
+                        None
+                    )
 
                     return render_template_string(
+
                         HTML,
+
                         title="Success",
-                        description="Command completed.",
+
+                        description=
+                            "Command completed.",
+
                         message=success_message
+
                     ), 200
 
                 except Exception as error:
@@ -395,18 +553,32 @@ def authenticate_command(
                         error
                     )
 
-                    sessions.pop(token, None)
+                    sessions.pop(
+                        token,
+                        None
+                    )
 
                     return render_template_string(
+
                         HTML,
+
                         title="Error",
-                        description="The command could not be completed.",
+
+                        description=
+                            "The command could not "
+                            "be completed.",
+
                         message=(
                             "Authentication succeeded, "
                             "but the phone command "
                             "could not be sent."
                         )
+
                     ), 502
+
+            # ----------------------------------------------
+            # Wrong Password
+            # ----------------------------------------------
 
             session["attempts"] += 1
 
@@ -417,14 +589,20 @@ def authenticate_command(
                 )
 
                 return render_template_string(
+
                     HTML,
+
                     title="Access Locked",
-                    description="Too many incorrect attempts.",
+
+                    description=
+                        "Too many incorrect attempts.",
+
                     message=(
                         "Incorrect password. "
                         f"Access locked for "
                         f"{LOCK_TIME // 60} minutes."
                     )
+
                 ), 429
 
             remaining = (
@@ -433,19 +611,30 @@ def authenticate_command(
             )
 
             return render_template_string(
+
                 HTML,
+
                 title="Authentication Failed",
-                description="Please try again.",
+
+                description=
+                    "Please try again.",
+
                 message=(
                     "Incorrect password. "
                     f"{remaining} attempt(s) remaining."
                 )
+
             ), 401
 
     return render_template_string(
+
         HTML,
+
         title="Secure Access",
-        description="Enter your master password.",
+
+        description=
+            "Enter your master password.",
+
         message=None
     )
 
@@ -483,10 +672,29 @@ def auth_stop(token):
 
 
 # ============================================================
+# UNMUTE Authentication
+# ============================================================
+
+@app.route(
+    "/auth-unmute/<token>",
+    methods=["GET", "POST"]
+)
+def auth_unmute(token):
+
+    return authenticate_command(
+        token,
+        "unmute"
+    )
+
+
+# ============================================================
 # Home
 # ============================================================
 
-@app.route("/", methods=["GET"])
+@app.route(
+    "/",
+    methods=["GET"]
+)
 def home():
 
     return """
@@ -499,7 +707,10 @@ def home():
 # Health Check
 # ============================================================
 
-@app.route("/health", methods=["GET"])
+@app.route(
+    "/health",
+    methods=["GET"]
+)
 def health():
 
     return {
@@ -524,19 +735,28 @@ def telegram_webhook():
         )
 
         if not update:
+
             return "OK", 200
 
-        message = update.get("message")
+        message = update.get(
+            "message"
+        )
 
         if not message:
+
             return "OK", 200
 
-        chat = message.get("chat")
+        chat = message.get(
+            "chat"
+        )
 
         if not chat:
+
             return "OK", 200
 
-        chat_id = chat.get("id")
+        chat_id = chat.get(
+            "id"
+        )
 
         text = message.get(
             "text",
@@ -550,11 +770,19 @@ def telegram_webhook():
         if text == "/start":
 
             telegram_send_message(
+
                 chat_id,
+
                 "Find My Phone Bot is ready.\n\n"
+
                 "Commands:\n"
+
                 "/findphone - Start phone alert\n"
-                "/stop - Stop phone alert"
+
+                "/stop - Stop phone alert\n"
+
+                "/unmute - Unmute phone + "
+                "set notification volume to 100%"
             )
 
         # ====================================================
@@ -566,15 +794,21 @@ def telegram_webhook():
             token = create_session()
 
             auth_url = (
-                f"{PUBLIC_BASE_URL}/auth/{token}"
+                f"{PUBLIC_BASE_URL}"
+                f"/auth/{token}"
             )
 
             telegram_send_message(
+
                 chat_id,
+
                 "🔐 Secure Find Phone\n\n"
+
                 "Open this temporary link "
                 "and enter your master password:\n\n"
+
                 f"{auth_url}\n\n"
+
                 f"Link expires in "
                 f"{SESSION_TTL // 60} minutes "
                 "and works only once."
@@ -589,33 +823,73 @@ def telegram_webhook():
             token = create_session()
 
             auth_url = (
-                f"{PUBLIC_BASE_URL}/auth-stop/{token}"
+                f"{PUBLIC_BASE_URL}"
+                f"/auth-stop/{token}"
             )
 
             telegram_send_message(
+
                 chat_id,
+
                 "🔐 Secure Stop\n\n"
+
                 "Open this temporary link "
                 "and enter your master password:\n\n"
+
                 f"{auth_url}\n\n"
+
                 f"Link expires in "
                 f"{SESSION_TTL // 60} minutes "
                 "and works only once."
             )
 
         # ====================================================
-        # Unknown command
+        # /unmute
+        # ====================================================
+
+        elif text == "/unmute":
+
+            token = create_session()
+
+            auth_url = (
+                f"{PUBLIC_BASE_URL}"
+                f"/auth-unmute/{token}"
+            )
+
+            telegram_send_message(
+
+                chat_id,
+
+                "🔐 Secure Unmute\n\n"
+
+                "Open this temporary link "
+                "and enter your master password:\n\n"
+
+                f"{auth_url}\n\n"
+
+                f"Link expires in "
+                f"{SESSION_TTL // 60} minutes "
+                "and works only once."
+            )
+
+        # ====================================================
+        # Unknown Command
         # ====================================================
 
         else:
 
             telegram_send_message(
+
                 chat_id,
+
                 "Unknown command.\n\n"
+
                 "Available commands:\n"
+
                 "/start\n"
                 "/findphone\n"
-                "/stop"
+                "/stop\n"
+                "/unmute"
             )
 
         return "OK", 200
@@ -627,7 +901,10 @@ def telegram_webhook():
             error
         )
 
-        return "Webhook error", 500
+        return (
+            "Webhook error",
+            500
+        )
 
 
 # ============================================================
