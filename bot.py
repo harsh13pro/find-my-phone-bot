@@ -15,6 +15,7 @@ app = Flask(__name__)
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 MACRODROID_WEBHOOK_URL = os.environ["MACRODROID_WEBHOOK_URL"]
+STOP_MACRODROID_WEBHOOK_URL = os.environ["STOP_MACRODROID_WEBHOOK_URL"]
 MASTER_PASSWORD = os.environ["MASTER_PASSWORD"]
 PUBLIC_BASE_URL = os.environ["PUBLIC_BASE_URL"].rstrip("/")
 
@@ -106,7 +107,7 @@ def verify_password(entered, actual):
 
 
 # ============================================================
-# MacroDroid
+# MacroDroid - FIND PHONE
 # ============================================================
 
 def trigger_macrodroid():
@@ -120,12 +121,50 @@ def trigger_macrodroid():
         allow_redirects=True
     )
 
-    print("MacroDroid HTTP status:", response.status_code)
-    print("MacroDroid response:", response.text[:500])
+    print(
+        "MacroDroid HTTP status:",
+        response.status_code
+    )
+
+    print(
+        "MacroDroid response:",
+        response.text[:500]
+    )
 
     response.raise_for_status()
 
     return response
+
+
+# ============================================================
+# MacroDroid - STOP
+# ============================================================
+
+def trigger_stop_macrodroid():
+    response = requests.get(
+        STOP_MACRODROID_WEBHOOK_URL,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "*/*"
+        },
+        timeout=30,
+        allow_redirects=True
+    )
+
+    print(
+        "STOP MacroDroid HTTP status:",
+        response.status_code
+    )
+
+    print(
+        "STOP MacroDroid response:",
+        response.text[:500]
+    )
+
+    response.raise_for_status()
+
+    return response
+
 
 # ============================================================
 # Authentication Page
@@ -141,7 +180,7 @@ HTML = """
 <meta name="viewport"
       content="width=device-width, initial-scale=1">
 
-<title>Find My Phone</title>
+<title>{{ title }}</title>
 
 <style>
 
@@ -205,10 +244,10 @@ button {
 
 <div class="card">
 
-<h2>Find My Phone</h2>
+<h2>{{ title }}</h2>
 
 <p>
-Enter your master password to activate the phone alert.
+{{ description }}
 </p>
 
 <form method="post">
@@ -222,7 +261,7 @@ Enter your master password to activate the phone alert.
 >
 
 <button type="submit">
-Authenticate & Activate
+Authenticate
 </button>
 
 </form>
@@ -248,23 +287,31 @@ This link is temporary and can be used only once.
 
 
 # ============================================================
-# Authentication Endpoint
+# Common Authentication Function
 # ============================================================
 
-@app.route("/auth/<token>", methods=["GET", "POST"])
-def auth(token):
+def authenticate_command(
+    token,
+    command_type
+):
 
     session = get_session(token)
 
     if not session:
-        return "This authentication link is invalid or expired.", 410
+        return (
+            "This authentication link is invalid or expired.",
+            410
+        )
 
     now = time.time()
 
     with sessions_lock:
 
         if session["used"]:
-            return "This authentication link has already been used.", 410
+            return (
+                "This authentication link has already been used.",
+                410
+            )
 
         if session["locked_until"] > now:
 
@@ -274,6 +321,8 @@ def auth(token):
 
             return render_template_string(
                 HTML,
+                title="Secure Access",
+                description="Authentication required.",
                 message=(
                     "Too many incorrect attempts. "
                     f"Try again in about {remaining} seconds."
@@ -284,7 +333,10 @@ def auth(token):
 
             sessions.pop(token, None)
 
-            return "This authentication link has expired.", 410
+            return (
+                "This authentication link has expired.",
+                410
+            )
 
         if request.method == "POST":
 
@@ -302,17 +354,39 @@ def auth(token):
 
                 try:
 
-                    trigger_macrodroid()
+                    if command_type == "findphone":
+
+                        trigger_macrodroid()
+
+                        success_message = (
+                            "Authentication successful. "
+                            "Find Phone command sent."
+                        )
+
+                    elif command_type == "stop":
+
+                        trigger_stop_macrodroid()
+
+                        success_message = (
+                            "Authentication successful. "
+                            "Find Phone alert stopped."
+                        )
+
+                    else:
+
+                        return (
+                            "Unknown command.",
+                            400
+                        )
 
                     sessions.pop(token, None)
 
                     return render_template_string(
                         HTML,
-                        message=(
-                            "Authentication successful. "
-                            "Find Phone command sent."
-                        )
-                    )
+                        title="Success",
+                        description="Command completed.",
+                        message=success_message
+                    ), 200
 
                 except Exception as error:
 
@@ -325,6 +399,8 @@ def auth(token):
 
                     return render_template_string(
                         HTML,
+                        title="Error",
+                        description="The command could not be completed.",
                         message=(
                             "Authentication succeeded, "
                             "but the phone command "
@@ -342,6 +418,8 @@ def auth(token):
 
                 return render_template_string(
                     HTML,
+                    title="Access Locked",
+                    description="Too many incorrect attempts.",
                     message=(
                         "Incorrect password. "
                         f"Access locked for "
@@ -356,6 +434,8 @@ def auth(token):
 
             return render_template_string(
                 HTML,
+                title="Authentication Failed",
+                description="Please try again.",
                 message=(
                     "Incorrect password. "
                     f"{remaining} attempt(s) remaining."
@@ -364,7 +444,41 @@ def auth(token):
 
     return render_template_string(
         HTML,
+        title="Secure Access",
+        description="Enter your master password.",
         message=None
+    )
+
+
+# ============================================================
+# FIND PHONE Authentication
+# ============================================================
+
+@app.route(
+    "/auth/<token>",
+    methods=["GET", "POST"]
+)
+def auth(token):
+
+    return authenticate_command(
+        token,
+        "findphone"
+    )
+
+
+# ============================================================
+# STOP Authentication
+# ============================================================
+
+@app.route(
+    "/auth-stop/<token>",
+    methods=["GET", "POST"]
+)
+def auth_stop(token):
+
+    return authenticate_command(
+        token,
+        "stop"
     )
 
 
@@ -397,7 +511,10 @@ def health():
 # Telegram Webhook
 # ============================================================
 
-@app.route("/telegram/webhook", methods=["POST"])
+@app.route(
+    "/telegram/webhook",
+    methods=["POST"]
+)
 def telegram_webhook():
 
     try:
@@ -426,17 +543,24 @@ def telegram_webhook():
             ""
         ).strip()
 
+        # ====================================================
         # /start
+        # ====================================================
+
         if text == "/start":
 
             telegram_send_message(
                 chat_id,
                 "Find My Phone Bot is ready.\n\n"
-                "Use /findphone to start "
-                "secure authentication."
+                "Commands:\n"
+                "/findphone - Start phone alert\n"
+                "/stop - Stop phone alert"
             )
 
+        # ====================================================
         # /findphone
+        # ====================================================
+
         elif text == "/findphone":
 
             token = create_session()
@@ -456,12 +580,42 @@ def telegram_webhook():
                 "and works only once."
             )
 
+        # ====================================================
+        # /stop
+        # ====================================================
+
+        elif text == "/stop":
+
+            token = create_session()
+
+            auth_url = (
+                f"{PUBLIC_BASE_URL}/auth-stop/{token}"
+            )
+
+            telegram_send_message(
+                chat_id,
+                "🔐 Secure Stop\n\n"
+                "Open this temporary link "
+                "and enter your master password:\n\n"
+                f"{auth_url}\n\n"
+                f"Link expires in "
+                f"{SESSION_TTL // 60} minutes "
+                "and works only once."
+            )
+
+        # ====================================================
+        # Unknown command
+        # ====================================================
+
         else:
 
             telegram_send_message(
                 chat_id,
                 "Unknown command.\n\n"
-                "Use /start or /findphone."
+                "Available commands:\n"
+                "/start\n"
+                "/findphone\n"
+                "/stop"
             )
 
         return "OK", 200
@@ -478,9 +632,6 @@ def telegram_webhook():
 
 # ============================================================
 # Register Telegram Webhook
-#
-# Gunicorn imports this file, so this executes when
-# the Render service starts.
 # ============================================================
 
 try:
