@@ -3,7 +3,9 @@ import os
 import time
 import secrets
 import hmac
+import re
 from threading import Lock
+from urllib.parse import urlparse
 
 import requests
 from flask import Flask, request, render_template_string
@@ -11,7 +13,7 @@ from flask import Flask, request, render_template_string
 app = Flask(__name__)
 
 # ============================================================
-# Environment Variables
+# Environment variables
 # ============================================================
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -21,10 +23,10 @@ PUBLIC_BASE_URL = os.environ["PUBLIC_BASE_URL"].rstrip("/")
 MACRODROID_WEBHOOK_URL = os.environ["MACRODROID_WEBHOOK_URL"]
 STOP_MACRODROID_WEBHOOK_URL = os.environ["STOP_MACRODROID_WEBHOOK_URL"]
 UNMUTE_MACRODROID_WEBHOOK_URL = os.environ["UNMUTE_MACRODROID_WEBHOOK_URL"]
-LOCATION_SECRET = os.environ["LOCATION_SECRET"]
+LOCATION_MACRODROID_WEBHOOK_URL = os.environ["LOCATION_MACRODROID_WEBHOOK_URL"]
 
-# Your private Telegram chat ID
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+LOCATION_SECRET = os.environ["LOCATION_SECRET"]
+TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"].strip()
 
 SESSION_TTL = int(os.getenv("SESSION_TTL", "300"))
 MAX_ATTEMPTS = int(os.getenv("MAX_ATTEMPTS", "3"))
@@ -37,7 +39,7 @@ TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 
 # ============================================================
-# Telegram Helpers
+# Telegram helpers
 # ============================================================
 
 def telegram_send_message(chat_id, message):
@@ -49,10 +51,7 @@ def telegram_send_message(chat_id, message):
     response.raise_for_status()
 
 
-def send_to_owner(message):
-    if not TELEGRAM_CHAT_ID:
-        raise RuntimeError("TELEGRAM_CHAT_ID is not configured")
-
+def send_owner_message(message):
     telegram_send_message(TELEGRAM_CHAT_ID, message)
 
 
@@ -67,44 +66,37 @@ def set_telegram_webhook():
 
 
 # ============================================================
-# MacroDroid Helpers
+# MacroDroid helpers
 # ============================================================
 
-def trigger_url(url):
+def trigger_macro(url, name):
     response = requests.get(
         url,
         headers={"User-Agent": "FindMyPhoneBot/1.0"},
         timeout=30,
         allow_redirects=True
     )
-    print("MacroDroid HTTP status:", response.status_code)
+
+    print(f"{name} HTTP status:", response.status_code)
+    print(f"{name} response:", response.text[:300])
+
     response.raise_for_status()
     return response
 
 
-def trigger_findphone():
-    return trigger_url(MACRODROID_WEBHOOK_URL)
-
-
-def trigger_stop():
-    return trigger_url(STOP_MACRODROID_WEBHOOK_URL)
-
-
-def trigger_unmute():
-    return trigger_url(UNMUTE_MACRODROID_WEBHOOK_URL)
-
-
 # ============================================================
-# Authentication Sessions
+# Authentication sessions
 # ============================================================
 
 def cleanup_sessions():
     now = time.time()
+
     with sessions_lock:
         expired = [
             token for token, data in sessions.items()
             if data["expires"] <= now
         ]
+
         for token in expired:
             sessions.pop(token, None)
 
@@ -126,6 +118,7 @@ def create_session():
 
 def get_session(token):
     cleanup_sessions()
+
     with sessions_lock:
         return sessions.get(token)
 
@@ -135,7 +128,7 @@ def verify_password(entered, actual):
 
 
 # ============================================================
-# Authentication Page
+# Authentication page
 # ============================================================
 
 HTML = """
@@ -163,8 +156,8 @@ input {
     background: #111827; color: white;
 }
 button {
-    border: 0; background: #2563eb; color: white;
-    font-weight: bold;
+    border: 0; background: #2563eb;
+    color: white; font-weight: bold;
 }
 .small { color: #9ca3af; font-size: 13px; }
 </style>
@@ -178,9 +171,7 @@ button {
 placeholder="Master password" autocomplete="current-password" required>
 <button type="submit">Authenticate &amp; Activate</button>
 </form>
-{% if message %}
-<p>{{ message }}</p>
-{% endif %}
+{% if message %}<p>{{ message }}</p>{% endif %}
 <p class="small">This link is temporary and can be used only once.</p>
 </div>
 </body>
@@ -189,7 +180,7 @@ placeholder="Master password" autocomplete="current-password" required>
 
 
 # ============================================================
-# Authentication Endpoint
+# Authentication endpoint
 # ============================================================
 
 @app.route("/auth/<token>", methods=["GET", "POST"])
@@ -236,29 +227,34 @@ def auth(token):
                     HTML,
                     message=f"Incorrect password. {remaining} attempt(s) remaining."
                 ), 401
+        else:
+            return render_template_string(HTML, message=None)
 
     try:
-        trigger_findphone()
+        trigger_macro(MACRODROID_WEBHOOK_URL, "Find Phone")
         with sessions_lock:
             sessions.pop(token, None)
 
         return render_template_string(
-            HTML, message="Authentication successful. Find Phone command sent."
+            HTML,
+            message="Authentication successful. Find Phone command sent."
         )
 
     except Exception as error:
-        print("MacroDroid error:", error)
+        print("Find Phone MacroDroid error:", error)
         with sessions_lock:
             sessions.pop(token, None)
 
         return render_template_string(
-            HTML, message="Authentication succeeded, but the phone command could not be sent."
+            HTML,
+            message="Authentication succeeded, but the phone command could not be sent."
         ), 502
 
 
 # ============================================================
-# Location Receiver
-# MacroDroid sends a Google Maps link in the "location" parameter.
+# Location receiver
+# MacroDroid sends location=<Google Maps URL>
+# and secret=<LOCATION_SECRET>.
 # ============================================================
 
 @app.route("/location", methods=["GET", "POST"])
@@ -269,50 +265,53 @@ def receive_location():
     if not hmac.compare_digest(supplied_secret, LOCATION_SECRET):
         return {"status": "error", "message": "Unauthorized"}, 401
 
-    if not location:
-        return {
-            "status": "error",
-            "message": "Missing location parameter"
-        }, 400
+    if not location or len(location) > 1000:
+        return {"status": "error", "message": "Location missing or too long"}, 400
 
-    # Accept only a Google Maps URL or coordinate pair.
+    # Accept Google Maps URLs or latitude,longitude coordinates.
+    parsed = urlparse(location)
     valid_maps_url = (
-        location.startswith("https://maps.google.com/")
-        or location.startswith("https://www.google.com/maps")
-        or location.startswith("https://maps.app.goo.gl/")
+        parsed.scheme == "https"
+        and parsed.hostname in {
+            "maps.google.com",
+            "www.google.com",
+            "maps.app.goo.gl"
+        }
+        and (
+            parsed.hostname != "www.google.com"
+            or parsed.path.startswith("/maps")
+        )
     )
-    valid_coordinates = False
 
-    if "," in location and len(location) < 100:
-        parts = location.split(",")
-        if len(parts) == 2:
-            try:
-                lat = float(parts[0].strip())
-                lon = float(parts[1].strip())
-                valid_coordinates = -90 <= lat <= 90 and -180 <= lon <= 180
-            except ValueError:
-                pass
+    valid_coordinates = False
+    match = re.fullmatch(
+        r"\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*",
+        location
+    )
+
+    if match:
+        lat, lon = float(match.group(1)), float(match.group(2))
+        valid_coordinates = -90 <= lat <= 90 and -180 <= lon <= 180
 
     if not (valid_maps_url or valid_coordinates):
         return {"status": "error", "message": "Invalid location format"}, 400
 
-    if not TELEGRAM_CHAT_ID:
-        return {"status": "error", "message": "TELEGRAM_CHAT_ID is not configured"}, 503
+    maps_link = location
+    if valid_coordinates:
+        maps_link = f"https://www.google.com/maps?q={location}"
 
     try:
-        telegram_send_message(
-            TELEGRAM_CHAT_ID,
-            "📍 Phone location received:\n" + location
-        )
-        return {"status": "ok", "message": "Location sent to Telegram"}, 200
+        send_owner_message("📍 Phone location:\n" + maps_link)
+        print("Location successfully delivered to Telegram.")
+        return {"status": "ok", "message": "Location sent"}, 200
 
     except Exception as error:
-        print("Telegram location delivery error:", error)
+        print("Location Telegram delivery error:", error)
         return {"status": "error", "message": "Telegram delivery failed"}, 502
 
 
 # ============================================================
-# Home and Health
+# Home and health
 # ============================================================
 
 @app.route("/", methods=["GET"])
@@ -326,7 +325,7 @@ def health():
 
 
 # ============================================================
-# Telegram Commands
+# Telegram webhook and commands
 # ============================================================
 
 @app.route("/telegram/webhook", methods=["POST"])
@@ -339,19 +338,17 @@ def telegram_webhook():
         if not chat:
             return "OK", 200
 
-        chat_id = chat.get("id")
+        chat_id = str(chat.get("id"))
         text = message.get("text", "").strip()
+        command = text.split()[0].split("@")[0] if text else ""
 
-        # Only the configured owner can control the phone.
-        if TELEGRAM_CHAT_ID and str(chat_id) != TELEGRAM_CHAT_ID:
+        # Only the configured owner may control this phone.
+        if chat_id != TELEGRAM_CHAT_ID:
             telegram_send_message(chat_id, "Unauthorized.")
             return "OK", 200
 
-        command = text.split()[0].split("@")[0] if text else ""
-
         if command == "/start":
-            telegram_send_message(
-                chat_id,
+            send_owner_message(
                 "Find My Phone Bot is ready.\n\n"
                 "/findphone - Secure phone alert\n"
                 "/stop - Stop phone alert\n"
@@ -363,8 +360,7 @@ def telegram_webhook():
             token = create_session()
             auth_url = f"{PUBLIC_BASE_URL}/auth/{token}"
 
-            telegram_send_message(
-                chat_id,
+            send_owner_message(
                 "🔐 Secure Find Phone\n\n"
                 "Open this temporary link and enter your master password:\n\n"
                 f"{auth_url}\n\n"
@@ -372,23 +368,27 @@ def telegram_webhook():
             )
 
         elif command == "/stop":
-            trigger_stop()
-            telegram_send_message(chat_id, "🛑 Stop command sent to MacroDroid.")
+            trigger_macro(STOP_MACRODROID_WEBHOOK_URL, "Stop")
+            send_owner_message("🛑 Stop command sent to MacroDroid.")
 
         elif command == "/unmute":
-            trigger_unmute()
-            telegram_send_message(chat_id, "🔊 Unmute command sent to MacroDroid.")
+            trigger_macro(UNMUTE_MACRODROID_WEBHOOK_URL, "Unmute")
+            send_owner_message("🔊 Unmute command sent to MacroDroid.")
 
         elif command == "/location":
-            trigger_url(os.environ["LOCATION_MACRODROID_WEBHOOK_URL"])
-            telegram_send_message(
-                chat_id,
-                "📍 Location request sent. Waiting for MacroDroid to send the location."
+            send_owner_message("📍 Requesting phone location...")
+
+            trigger_macro(
+                LOCATION_MACRODROID_WEBHOOK_URL,
+                "Location"
+            )
+
+            send_owner_message(
+                "✅ Location macro triggered. Waiting for the location link."
             )
 
         else:
-            telegram_send_message(
-                chat_id,
+            send_owner_message(
                 "Unknown command.\nUse /start to see available commands."
             )
 
@@ -400,7 +400,7 @@ def telegram_webhook():
 
 
 # ============================================================
-# Register Telegram Webhook
+# Register Telegram webhook on startup
 # ============================================================
 
 try:
