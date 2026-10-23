@@ -248,7 +248,7 @@ def receive_location():
 
     parsed = urlparse(location)
     valid_maps_url = (
-        parsed.scheme == "https"
+        parsed.scheme in {"http", "https"}
         and parsed.hostname in {
             "maps.google.com", "www.google.com", "maps.app.goo.gl"
         }
