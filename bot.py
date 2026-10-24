@@ -1,3 +1,4 @@
+
 import os
 import time
 import secrets
@@ -34,13 +35,15 @@ LOCK_TIME = int(os.getenv("LOCK_TIME", "600"))
 LOCATION_MESSAGE_TTL = int(os.getenv("LOCATION_MESSAGE_TTL", "300"))
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+
 sessions = {}
 sessions_lock = Lock()
 
-# Each location result goes to the private chat that requested it.
+# Location results are sent to the private chat that requested them.
 pending_location_requests = []
 pending_location_lock = Lock()
 
+# Every action below requires password verification.
 PROTECTED_ACTIONS = {
     "/findphone": {
         "label": "Find Phone alert",
@@ -57,6 +60,11 @@ PROTECTED_ACTIONS = {
         "url": UNMUTE_MACRODROID_WEBHOOK_URL,
         "macro_name": "Unmute",
     },
+    "/stop": {
+        "label": "Stop alert",
+        "url": STOP_MACRODROID_WEBHOOK_URL,
+        "macro_name": "Stop",
+    },
 }
 
 
@@ -68,8 +76,10 @@ def telegram_api_call(method, payload):
     )
     response.raise_for_status()
     data = response.json()
+
     if not data.get("ok"):
         raise RuntimeError(f"Telegram API {method} failed")
+
     return data.get("result")
 
 
@@ -110,6 +120,7 @@ def send_temporary_location(chat_id, maps_link):
             ),
         },
     )
+
     delete_message_later(
         chat_id,
         result["message_id"],
@@ -137,19 +148,24 @@ def trigger_macro(url, name):
         timeout=(3, 8),
         allow_redirects=True,
     )
+
     logger.info("%s MacroDroid HTTP status: %s", name, response.status_code)
     logger.info("%s MacroDroid response: %s", name, response.text[:200])
+
     response.raise_for_status()
     return response
 
 
 def cleanup_sessions():
     now = time.time()
+
     with sessions_lock:
         expired = [
-            token for token, data in sessions.items()
+            token
+            for token, data in sessions.items()
             if data["expires"] <= now or data["used"]
         ]
+
         for token in expired:
             sessions.pop(token, None)
 
@@ -157,6 +173,7 @@ def cleanup_sessions():
 def create_session(action, requester_chat_id):
     cleanup_sessions()
     token = secrets.token_urlsafe(32)
+
     with sessions_lock:
         sessions[token] = {
             "expires": time.time() + SESSION_TTL,
@@ -166,11 +183,13 @@ def create_session(action, requester_chat_id):
             "action": action,
             "requester_chat_id": str(requester_chat_id),
         }
+
     return token
 
 
 def get_session(token):
     cleanup_sessions()
+
     with sessions_lock:
         return sessions.get(token)
 
@@ -186,14 +205,43 @@ HTML = """
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Find My Phone - Verify</title>
 <style>
-body { margin:0; font-family:Arial,sans-serif; background:#111827; color:white; }
-.card { max-width:420px; margin:50px auto; padding:28px; background:#1f2937;
-        border-radius:18px; box-sizing:border-box; }
-input,button { width:100%; box-sizing:border-box; padding:14px; margin:12px 0;
-               border-radius:10px; font-size:16px; }
-input { border:1px solid #4b5563; background:#111827; color:white; }
-button { border:0; background:#2563eb; color:white; font-weight:bold; }
-.small { color:#9ca3af; font-size:13px; }
+body {
+    margin: 0;
+    font-family: Arial, sans-serif;
+    background: #111827;
+    color: white;
+}
+.card {
+    max-width: 420px;
+    margin: 50px auto;
+    padding: 28px;
+    background: #1f2937;
+    border-radius: 18px;
+    box-sizing: border-box;
+}
+input, button {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 14px;
+    margin: 12px 0;
+    border-radius: 10px;
+    font-size: 16px;
+}
+input {
+    border: 1px solid #4b5563;
+    background: #111827;
+    color: white;
+}
+button {
+    border: 0;
+    background: #2563eb;
+    color: white;
+    font-weight: bold;
+}
+.small {
+    color: #9ca3af;
+    font-size: 13px;
+}
 </style>
 </head>
 <body>
@@ -202,7 +250,8 @@ button { border:0; background:#2563eb; color:white; font-weight:bold; }
 <p>Verify the master password to authorize:
 <strong>{{ action_label }}</strong>.</p>
 <form method="post">
-<input type="password" name="password" placeholder="Master password"
+<input type="password" name="password"
+       placeholder="Master password"
        autocomplete="current-password" required autofocus>
 <button type="submit">Verify &amp; Run Command</button>
 </form>
@@ -218,6 +267,7 @@ Never share it with anyone else.</p>
 @app.route("/auth/<token>", methods=["GET", "POST"])
 def auth(token):
     session = get_session(token)
+
     if not session:
         return "This authentication link is invalid, expired, or already used.", 410
 
@@ -247,6 +297,7 @@ def auth(token):
             )
 
         entered = request.form.get("password", "")
+
         if not verify_password(entered, MASTER_PASSWORD):
             session["attempts"] += 1
 
@@ -260,6 +311,7 @@ def auth(token):
                 ), 429
 
             remaining = MAX_ATTEMPTS - session["attempts"]
+
             return render_template_string(
                 HTML,
                 action_label=PROTECTED_ACTIONS[session["action"]]["label"],
@@ -267,14 +319,14 @@ def auth(token):
                 message=f"Incorrect password. {remaining} attempt(s) remaining.",
             ), 401
 
-        # A successful one-time link cannot be replayed.
+        # Mark the one-time link as used after successful authentication.
         session["used"] = True
         action = session["action"]
         requester_chat_id = session["requester_chat_id"]
 
     try:
         if action == "/location":
-            # Register the requesting chat before triggering MacroDroid.
+            # Register the request before triggering MacroDroid.
             with pending_location_lock:
                 pending_location_requests.append({
                     "chat_id": requester_chat_id,
@@ -295,23 +347,29 @@ def auth(token):
         if action == "/location":
             telegram_send_message(
                 requester_chat_id,
-                "✅ Location macro triggered. The Google Maps link will be sent to this chat when received.",
+                "✅ Location macro triggered. The Google Maps link will be "
+                "sent to this chat when received.",
             )
         else:
             telegram_send_message(
                 requester_chat_id,
-                f"✅ Password verified. {config['label']} command sent to MacroDroid.",
+                f"✅ Password verified. {config['label']} command "
+                "sent to MacroDroid.",
             )
 
         return render_template_string(
             HTML,
             action_label=config["label"],
             ttl=SESSION_TTL,
-            message="Password verified. Command sent successfully. You can close this page.",
+            message=(
+                "Password verified. Command sent successfully. "
+                "You can close this page."
+            ),
         ), 200
 
     except Exception:
         logger.exception("Authenticated command execution failed")
+
         with sessions_lock:
             sessions.pop(token, None)
 
@@ -325,7 +383,8 @@ def auth(token):
         try:
             telegram_send_message(
                 requester_chat_id,
-                "⚠️ Password was accepted, but the command could not be sent. Check the bot service logs.",
+                "⚠️ Password was accepted, but the command could not be sent. "
+                "Check the bot service logs.",
             )
         except Exception:
             logger.exception("Could not notify command requester")
@@ -334,7 +393,10 @@ def auth(token):
             HTML,
             action_label=PROTECTED_ACTIONS[action]["label"],
             ttl=SESSION_TTL,
-            message="Password accepted, but the command could not be sent. Please try again.",
+            message=(
+                "Password accepted, but the command could not be sent. "
+                "Please try again."
+            ),
         ), 502
 
 
@@ -351,6 +413,7 @@ def receive_location():
         return {"status": "error", "message": "Location missing or too long"}, 400
 
     parsed = urlparse(location)
+
     valid_maps_url = (
         parsed.scheme in {"http", "https"}
         and parsed.hostname in {
@@ -368,10 +431,12 @@ def receive_location():
         r"\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*",
         location,
     )
+
     valid_coordinates = False
 
     if match:
-        lat, lon = float(match.group(1)), float(match.group(2))
+        lat = float(match.group(1))
+        lon = float(match.group(2))
         valid_coordinates = -90 <= lat <= 90 and -180 <= lon <= 180
 
     if not (valid_maps_url or valid_coordinates):
@@ -384,13 +449,15 @@ def receive_location():
     else:
         maps_link = location
 
-    # Route the location callback to the private chat that requested it.
+    # Deliver the location to the chat that requested it.
     now = time.time()
+
     with pending_location_lock:
         pending_location_requests[:] = [
             item for item in pending_location_requests
             if item["expires"] > now
         ]
+
         target = (
             pending_location_requests.pop(0)
             if pending_location_requests
@@ -403,8 +470,9 @@ def receive_location():
 
     try:
         send_temporary_location(target["chat_id"], maps_link)
-        logger.info("Location successfully delivered to requesting Telegram chat")
+        logger.info("Location delivered to requesting Telegram chat")
         return {"status": "ok", "message": "Location sent"}, 200
+
     except Exception:
         logger.exception("Location Telegram delivery error")
         return {"status": "error", "message": "Telegram delivery failed"}, 502
@@ -424,6 +492,7 @@ def process_telegram_update(update):
     try:
         message = update.get("message") or {}
         chat = message.get("chat") or {}
+
         if not chat:
             return
 
@@ -442,33 +511,11 @@ def process_telegram_update(update):
                 "/findphone - Password required\n"
                 "/location - Password required; result goes to this chat\n"
                 "/unmute - Password required\n"
-                "/stop - No password, owner chat only",
+                "/stop - Password required",
             )
             return
 
-        if command == "/stop":
-            # Password-free, but restricted to the owner's private chat.
-            if chat_id != TELEGRAM_CHAT_ID or chat_type != "private":
-                telegram_send_message(
-                    chat_id,
-                    "⛔ /stop is password-free but can only be used from the owner's private Telegram chat.",
-                )
-                return
-
-            try:
-                trigger_macro(STOP_MACRODROID_WEBHOOK_URL, "Stop")
-                telegram_send_message(
-                    chat_id,
-                    "🛑 Stop command sent to MacroDroid.",
-                )
-            except Exception:
-                logger.exception("Stop MacroDroid command failed")
-                telegram_send_message(
-                    chat_id,
-                    "⚠️ Stop command could not reach MacroDroid. Check the service logs.",
-                )
-            return
-
+        # All action commands, including /stop, require a password.
         if command in PROTECTED_ACTIONS:
             if chat_type != "private":
                 telegram_send_message(
@@ -484,7 +531,8 @@ def process_telegram_update(update):
                 chat_id,
                 "🔐 Password required\n\n"
                 f"Command: {PROTECTED_ACTIONS[command]['label']}\n"
-                "Open this one-time verification link and enter the master password:\n\n"
+                "Open this one-time verification link and enter the "
+                "master password:\n\n"
                 f"{auth_url}\n\n"
                 f"Link expires in {SESSION_TTL // 60} minute(s), "
                 f"allows {MAX_ATTEMPTS} attempts, and works once.",
@@ -503,11 +551,13 @@ def process_telegram_update(update):
 @app.route("/telegram/webhook", methods=["POST"])
 def telegram_webhook():
     update = request.get_json(silent=True) or {}
+
     Thread(
         target=process_telegram_update,
         args=(update,),
         daemon=True,
     ).start()
+
     return "OK", 200
 
 
