@@ -34,16 +34,20 @@ MAX_ATTEMPTS = int(os.getenv("MAX_ATTEMPTS", "3"))
 LOCK_TIME = int(os.getenv("LOCK_TIME", "600"))
 LOCATION_MESSAGE_TTL = int(os.getenv("LOCATION_MESSAGE_TTL", "300"))
 
+# Keep a location request active for at least 15 minutes.
+# This does not guarantee GPS acquisition; it only extends server-side tracking.
+LOCATION_REQUEST_TTL = max(
+    900, int(os.getenv("LOCATION_REQUEST_TTL", "900"))
+)
+
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 sessions = {}
 sessions_lock = Lock()
 
-# Location results are sent to the private chat that requested them.
 pending_location_requests = []
 pending_location_lock = Lock()
 
-# Every action below requires password verification.
 PROTECTED_ACTIONS = {
     "/findphone": {
         "label": "Find Phone alert",
@@ -90,10 +94,6 @@ def telegram_send_message(chat_id, message):
     )
 
 
-def send_owner_message(message):
-    return telegram_send_message(TELEGRAM_CHAT_ID, message)
-
-
 def delete_message_later(chat_id, message_id, delay):
     def worker():
         time.sleep(max(1, delay))
@@ -116,7 +116,8 @@ def send_temporary_location(chat_id, maps_link):
             "chat_id": chat_id,
             "text": (
                 "📍 Phone location (this message is scheduled to delete "
-                "in 5 minutes):\n" + maps_link
+                f"in {max(1, LOCATION_MESSAGE_TTL // 60)} minute(s)):\n"
+                + maps_link
             ),
         },
     )
@@ -149,8 +150,16 @@ def trigger_macro(url, name):
         allow_redirects=True,
     )
 
-    logger.info("%s MacroDroid HTTP status: %s", name, response.status_code)
-    logger.info("%s MacroDroid response: %s", name, response.text[:200])
+    logger.info(
+        "%s MacroDroid HTTP status: %s",
+        name,
+        response.status_code,
+    )
+    logger.info(
+        "%s MacroDroid response: %s",
+        name,
+        response.text[:200],
+    )
 
     response.raise_for_status()
     return response
@@ -311,7 +320,6 @@ def auth(token):
                 ), 429
 
             remaining = MAX_ATTEMPTS - session["attempts"]
-
             return render_template_string(
                 HTML,
                 action_label=PROTECTED_ACTIONS[session["action"]]["label"],
@@ -319,19 +327,24 @@ def auth(token):
                 message=f"Incorrect password. {remaining} attempt(s) remaining.",
             ), 401
 
-        # Mark the one-time link as used after successful authentication.
         session["used"] = True
         action = session["action"]
         requester_chat_id = session["requester_chat_id"]
 
     try:
         if action == "/location":
-            # Register the request before triggering MacroDroid.
+            # Register request BEFORE triggering MacroDroid.
             with pending_location_lock:
                 pending_location_requests.append({
                     "chat_id": requester_chat_id,
-                    "expires": time.time() + SESSION_TTL,
+                    "created": time.time(),
+                    "expires": time.time() + LOCATION_REQUEST_TTL,
                 })
+
+                logger.info(
+                    "Location request registered; pending count: %s",
+                    len(pending_location_requests),
+                )
 
             telegram_send_message(
                 requester_chat_id,
@@ -347,8 +360,8 @@ def auth(token):
         if action == "/location":
             telegram_send_message(
                 requester_chat_id,
-                "✅ Location macro triggered. The Google Maps link will be "
-                "sent to this chat when received.",
+                "✅ Location macro triggered. Waiting for the location "
+                f"callback (up to {LOCATION_REQUEST_TTL // 60} minutes).",
             )
         else:
             telegram_send_message(
@@ -361,10 +374,7 @@ def auth(token):
             HTML,
             action_label=config["label"],
             ttl=SESSION_TTL,
-            message=(
-                "Password verified. Command sent successfully. "
-                "You can close this page."
-            ),
+            message="Password verified. Command sent successfully. You can close this page.",
         ), 200
 
     except Exception:
@@ -393,23 +403,23 @@ def auth(token):
             HTML,
             action_label=PROTECTED_ACTIONS[action]["label"],
             ttl=SESSION_TTL,
-            message=(
-                "Password accepted, but the command could not be sent. "
-                "Please try again."
-            ),
+            message="Password accepted, but the command could not be sent. Please try again.",
         ), 502
 
 
 @app.route("/location", methods=["GET", "POST"])
 def receive_location():
+    logger.info("Location callback received using %s", request.method)
+
     supplied_secret = request.values.get("secret", "")
     location = request.values.get("location", "").strip()
 
     if not hmac.compare_digest(supplied_secret, LOCATION_SECRET):
-        logger.warning("Rejected location request: invalid secret")
+        logger.warning("Rejected location callback: invalid secret")
         return {"status": "error", "message": "Unauthorized"}, 401
 
     if not location or len(location) > 1000:
+        logger.warning("Rejected location callback: missing/long location")
         return {"status": "error", "message": "Location missing or too long"}, 400
 
     parsed = urlparse(location)
@@ -440,6 +450,7 @@ def receive_location():
         valid_coordinates = -90 <= lat <= 90 and -180 <= lon <= 180
 
     if not (valid_maps_url or valid_coordinates):
+        logger.warning("Rejected location callback: invalid location format")
         return {"status": "error", "message": "Invalid location format"}, 400
 
     if valid_coordinates:
@@ -449,10 +460,10 @@ def receive_location():
     else:
         maps_link = location
 
-    # Deliver the location to the chat that requested it.
     now = time.time()
 
     with pending_location_lock:
+        # Remove expired requests.
         pending_location_requests[:] = [
             item for item in pending_location_requests
             if item["expires"] > now
@@ -464,13 +475,24 @@ def receive_location():
             else None
         )
 
-    if not target:
-        logger.warning("Location received with no active requesting chat")
-        return {"status": "error", "message": "No active location request"}, 410
+        remaining = len(pending_location_requests)
+
+    if target:
+        destination_chat = target["chat_id"]
+        logger.info(
+            "Location matched to requesting chat; pending requests left: %s",
+            remaining,
+        )
+    else:
+        # Fallback: send to configured owner chat rather than discard it.
+        destination_chat = TELEGRAM_CHAT_ID
+        logger.warning(
+            "No active requesting chat; using configured owner chat fallback"
+        )
 
     try:
-        send_temporary_location(target["chat_id"], maps_link)
-        logger.info("Location delivered to requesting Telegram chat")
+        send_temporary_location(destination_chat, maps_link)
+        logger.info("Location delivered successfully")
         return {"status": "ok", "message": "Location sent"}, 200
 
     except Exception:
@@ -509,13 +531,12 @@ def process_telegram_update(update):
                 chat_id,
                 "Find My Phone Bot is ready.\n\n"
                 "/findphone - Password required\n"
-                "/location - Password required; result goes to this chat\n"
+                "/location - Password required\n"
                 "/unmute - Password required\n"
                 "/stop - Password required",
             )
             return
 
-        # All action commands, including /stop, require a password.
         if command in PROTECTED_ACTIONS:
             if chat_type != "private":
                 telegram_send_message(
