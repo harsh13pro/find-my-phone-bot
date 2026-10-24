@@ -33,9 +33,6 @@ SESSION_TTL = int(os.getenv("SESSION_TTL", "300"))
 MAX_ATTEMPTS = int(os.getenv("MAX_ATTEMPTS", "3"))
 LOCK_TIME = int(os.getenv("LOCK_TIME", "600"))
 LOCATION_MESSAGE_TTL = int(os.getenv("LOCATION_MESSAGE_TTL", "300"))
-
-# Keep a location request active for at least 15 minutes.
-# This does not guarantee GPS acquisition; it only extends server-side tracking.
 LOCATION_REQUEST_TTL = max(
     900, int(os.getenv("LOCATION_REQUEST_TTL", "900"))
 )
@@ -204,7 +201,15 @@ def get_session(token):
 
 
 def verify_password(entered, actual):
-    return hmac.compare_digest(entered, actual)
+    # compare_digest on str rejects non-ASCII characters.
+    # Comparing UTF-8 bytes supports Unicode passwords safely.
+    try:
+        return hmac.compare_digest(
+            entered.encode("utf-8"),
+            actual.encode("utf-8"),
+        )
+    except (AttributeError, TypeError):
+        return False
 
 
 HTML = """
@@ -333,7 +338,7 @@ def auth(token):
 
     try:
         if action == "/location":
-            # Register request BEFORE triggering MacroDroid.
+            # Register the pending request before triggering MacroDroid.
             with pending_location_lock:
                 pending_location_requests.append({
                     "chat_id": requester_chat_id,
@@ -414,7 +419,10 @@ def receive_location():
     supplied_secret = request.values.get("secret", "")
     location = request.values.get("location", "").strip()
 
-    if not hmac.compare_digest(supplied_secret, LOCATION_SECRET):
+    if not hmac.compare_digest(
+        supplied_secret.encode("utf-8"),
+        LOCATION_SECRET.encode("utf-8"),
+    ):
         logger.warning("Rejected location callback: invalid secret")
         return {"status": "error", "message": "Unauthorized"}, 401
 
@@ -463,7 +471,6 @@ def receive_location():
     now = time.time()
 
     with pending_location_lock:
-        # Remove expired requests.
         pending_location_requests[:] = [
             item for item in pending_location_requests
             if item["expires"] > now
@@ -474,7 +481,6 @@ def receive_location():
             if pending_location_requests
             else None
         )
-
         remaining = len(pending_location_requests)
 
     if target:
@@ -484,7 +490,7 @@ def receive_location():
             remaining,
         )
     else:
-        # Fallback: send to configured owner chat rather than discard it.
+        # Fallback goes only to the configured owner chat.
         destination_chat = TELEGRAM_CHAT_ID
         logger.warning(
             "No active requesting chat; using configured owner chat fallback"
